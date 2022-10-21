@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-var _debug bool = false
+var _debug = false
 var _role string
 
 type nonBlookLocker struct {
@@ -22,7 +22,7 @@ type nonBlookLocker struct {
 	locked bool
 }
 
-type srvMgr struct {
+type SrvMgr struct {
 	wg     sync.WaitGroup
 	connWg sync.WaitGroup
 
@@ -47,8 +47,8 @@ var sig chan os.Signal
 
 const env = "_SERVER_HOT_RESTART_"
 
-func NewMgr() *srvMgr {
-	s := &srvMgr{
+func NewMgr() *SrvMgr {
+	s := &SrvMgr{
 		listenAddr:      "0.0.0.0:9999",
 		sockFile:        "/tmp/hot_reload.sock",
 		stopAcceptCycle: false,
@@ -64,7 +64,7 @@ func NewMgr() *srvMgr {
 
 	return s
 }
-func (s *srvMgr) Run() {
+func (s *SrvMgr) Run() {
 	if _role == "father" {
 		ln, err := net.Listen("tcp", s.listenAddr)
 		if err != nil {
@@ -72,7 +72,10 @@ func (s *srvMgr) Run() {
 		}
 		s.listener = ln
 		s.startAccept()
-		os.Setenv(env, "1")
+		err := os.Setenv(env, "1")
+		if err != nil {
+			panic(err)
+		}
 	} else {
 		//接收listener和conn,阻塞运行
 		s.startSockClient()
@@ -81,42 +84,48 @@ func (s *srvMgr) Run() {
 	s.signalHandler()
 	s.startSockServer()
 
-	print("server started")
+	myprint("server started")
 	_role = "father"
 	s.wg.Wait()
-	print("server exited")
+	myprint("server exited")
 }
 
-func (s *srvMgr) startAccept() {
+func (s *SrvMgr) startAccept() {
 	s.wg.Add(1)
 	s.stopAcceptCycle = false
 	go func() {
 		defer s.wg.Done()
-		defer print("stop accept")
+		defer myprint("stop accept")
 
-		print("start accept")
+		myprint("start accept")
 		for !s.stopAcceptCycle {
 			conn, err := s.listener.Accept()
 			if err != nil {
 				if strings.Contains(err.Error(), "i/o timeout") {
 					break
 				} else {
-					print("connect error:", err.Error())
+					myprint("connect error:", err.Error())
 					continue
 				}
 			}
 			s.newConn(conn)
 		}
 		//cancel deadline
-		s.listener.(*net.TCPListener).SetDeadline(time.Time{})
+		err := s.listener.(*net.TCPListener).SetDeadline(time.Time{})
+		if err != nil {
+			panic(err)
+		}
 	}()
 }
-func (s *srvMgr) stopAccept() {
+func (s *SrvMgr) stopAccept() {
 	s.stopAcceptCycle = true
-	s.listener.(*net.TCPListener).SetDeadline(time.Now())
+	err := s.listener.(*net.TCPListener).SetDeadline(time.Now())
+	if err != nil {
+		panic(err)
+	}
 }
 
-func (s *srvMgr) newConn(conn net.Conn) {
+func (s *SrvMgr) newConn(conn net.Conn) {
 	s.connWg.Add(1)
 	go func() {
 		defer s.connWg.Done()
@@ -135,7 +144,7 @@ func (s *srvMgr) newConn(conn net.Conn) {
 						} else {
 							if maxTryTimes <= 0 {
 								//force exit
-								print("force exit conn cycle")
+								myprint("force exit conn cycle")
 								break
 							}
 						}
@@ -145,7 +154,7 @@ func (s *srvMgr) newConn(conn net.Conn) {
 
 			err := conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 			if err != nil {
-				print("conn set deadline error:", err)
+				myprint("conn set deadline error:", err)
 			}
 
 			//your business here
@@ -159,18 +168,21 @@ func (s *srvMgr) newConn(conn net.Conn) {
 					//timeout
 					continue
 				} else {
-					print("read error:", err)
+					myprint("read error:", err)
 					continue
 				}
 			}
-			__send(&conn, []byte(str))
+			err = __send(&conn, []byte(str))
+			if err != nil {
+				myprint("__send error:", err)
+			}
 		}
 
 	}()
 }
 
-func (s *srvMgr) signalHandler() {
-	print("signalHandler started")
+func (s *SrvMgr) signalHandler() {
+	myprint("signalHandler started")
 	go func() {
 		sig = make(chan os.Signal)
 		signal.Notify(sig, syscall.SIGUSR1)
@@ -187,16 +199,16 @@ func (s *srvMgr) signalHandler() {
 				}
 				pid, err := syscall.ForkExec(os.Args[0], os.Args, env)
 				if err != nil {
-					print("ForkExec error:" + err.Error())
+					myprint("ForkExec error:" + err.Error())
 				} else {
-					print("forked child pid: ", pid)
+					myprint("forked child pid: ", pid)
 				}
 			}
 		}
 	}()
 }
 
-func (s *srvMgr) sendConn(conn net.Conn) (locked, ret bool) {
+func (s *SrvMgr) sendConn(conn net.Conn) (locked, ret bool) {
 	//for "to many open files"
 	if !s.connSendLock.lock() {
 		return
@@ -206,27 +218,32 @@ func (s *srvMgr) sendConn(conn net.Conn) (locked, ret bool) {
 
 	defer func() {
 		if r := recover(); r != nil {
-			print("send conn recover:", r)
+			myprint("send conn recover:", r)
 		}
 	}()
 
 	tcpConn := conn.(*net.TCPConn)
 	f, err := tcpConn.File()
 	if err != nil {
-		print("trans conn to file failed:", err)
+		myprint("trans conn to file failed:", err)
 		ret = false
 	}
-	defer f.Close()
+	defer func(f *os.File) {
+		err := f.Close()
+		if err != nil {
+			myprint(err)
+		}
+	}(f)
 
 	err = sendFd(s.childUnixConn, f)
 	if err != nil {
-		print("trans conn failed:", err)
+		myprint("trans conn failed:", err)
 		ret = false
 	}
 	_, msg, _, err := recv(s.childUnixConn)
 	if err != nil {
-		print("get trans conn resp error:", err)
-		print(err)
+		myprint("get trans conn resp error:", err)
+		myprint(err)
 	}
 	if msg == "trans_conn_ok" {
 		debug("send a conn success")
@@ -238,44 +255,52 @@ func (s *srvMgr) sendConn(conn net.Conn) (locked, ret bool) {
 	time.Sleep(time.Microsecond * 10)
 	return
 }
-func (s *srvMgr) sendListener() bool {
+func (s *SrvMgr) sendListener() bool {
 	defer func() {
 		if r := recover(); r != nil {
-			print("send listener recover:", r)
+			myprint("send listener recover:", r)
 		}
 	}()
 	tcpln := s.listener.(*net.TCPListener)
 	f, err := tcpln.File()
 	if err != nil {
-		print("lintener to TCPListener error:", err.Error())
+		myprint("lintener to TCPListener error:", err.Error())
 		return false
 	}
-	defer f.Close()
+	defer func(f *os.File) {
+		err := f.Close()
+		if err != nil {
+			myprint(err)
+		}
+	}(f)
 
 	err = sendFd(s.childUnixConn, f)
 	if err != nil {
-		print("send listener error1:", err.Error())
+		myprint("send listener error1:", err.Error())
 		return false
 	}
 	_, msg, _, err := recv(s.childUnixConn)
 	if err != nil {
-		print("send listener error2:", err.Error())
+		myprint("send listener error2:", err.Error())
 		return false
 	}
 	if msg == "trans_listener_ok" {
 		return true
 	} else {
-		print("send listener error3")
+		myprint("send listener error3")
 		return false
 	}
 }
 
-func (s *srvMgr) startSockServer() {
+func (s *SrvMgr) startSockServer() {
 	s.wg.Add(1)
 	go func() {
 		defer debug("sock server exit")
 		defer s.wg.Done()
-		os.Remove(s.sockFile)
+		err := os.Remove(s.sockFile)
+		if err != nil {
+			panic(err)
+		}
 
 		var unixAddr *net.UnixAddr
 		unixAddr, _ = net.ResolveUnixAddr("unix", s.sockFile)
@@ -284,10 +309,18 @@ func (s *srvMgr) startSockServer() {
 			panic(err)
 		}
 
-		defer unixListener.Close()
+		defer func(unixListener *net.UnixListener) {
+			err := unixListener.Close()
+			if err != nil {
+				myprint(err)
+			}
+		}(unixListener)
 
 		for {
-			unixListener.SetDeadline(time.Now().Add(time.Second * 3))
+			err := unixListener.SetDeadline(time.Now().Add(time.Second * 3))
+			if err != nil {
+				panic(err)
+			}
 			unixConn, err := unixListener.AcceptUnix()
 			if err != nil {
 				if strings.Contains(err.Error(), "i/o timeout") {
@@ -297,7 +330,7 @@ func (s *srvMgr) startSockServer() {
 						continue
 					}
 				}
-				print("unix sock server Accept error: ", err.Error())
+				myprint("unix sock server Accept error: ", err.Error())
 				continue
 			}
 			s.childUnixConn = unixConn
@@ -305,7 +338,10 @@ func (s *srvMgr) startSockServer() {
 			_ = sendTxt(unixConn, "trans_listener")
 
 			if !s.sendListener() {
-				unixConn.Close()
+				err := unixConn.Close()
+				if err != nil {
+					panic(err)
+				}
 				break
 			}
 			s.stopAccept()
@@ -323,14 +359,14 @@ func (s *srvMgr) startSockServer() {
 
 			_ = sendTxt(unixConn, "all_finish")
 			time.Sleep(time.Microsecond * 100)
-			unixConn.Close()
-			print("father unix socket exit")
+			_ = unixConn.Close()
+			myprint("father unix socket exit")
 			break
 		}
 	}()
 }
 
-func (s *srvMgr) startSockClient() {
+func (s *SrvMgr) startSockClient() {
 	var unixAddr *net.UnixAddr
 	unixAddr, _ = net.ResolveUnixAddr("unix", s.sockFile)
 
@@ -339,79 +375,84 @@ func (s *srvMgr) startSockClient() {
 		panic(err)
 	}
 
-	defer unixConn.Close()
+	defer func(unixConn *net.UnixConn) {
+		err := unixConn.Close()
+		if err != nil {
+			myprint(err)
+		}
+	}(unixConn)
 
 WAIT_CMD:
 	for {
 		_type, msg, _, err := recv(unixConn)
 		if err != nil {
-			print("wait cmd error:" + err.Error())
+			myprint("wait cmd error:" + err.Error())
 			continue
 		}
 		if _type != "txt" {
-			print("cmd type error:", _type)
+			myprint("cmd type error:", _type)
 			continue
 		}
 		switch msg {
 		case "trans_listener":
 			_type, _, file, err := recv(unixConn)
 			if err != nil {
-				print("trans_listener1", err.Error())
-				sendTxt(unixConn, "error")
+				myprint("trans_listener1", err.Error())
+				_ = sendTxt(unixConn, "error")
 				continue WAIT_CMD
 			}
 			if _type != "fd" {
-				print("trans_listener2")
-				sendTxt(unixConn, "trans_listener_error")
+				myprint("trans_listener2")
+				_ = sendTxt(unixConn, "trans_listener_error")
 				continue WAIT_CMD
 			}
 
 			ln, err := net.FileListener(file)
 			if err != nil {
-				print("trans_listener3", err.Error())
-				sendTxt(unixConn, "trans_listener_error")
+				myprint("trans_listener3", err.Error())
+				_ = sendTxt(unixConn, "trans_listener_error")
 				continue WAIT_CMD
 			}
 			s.listener = ln
 			s.startAccept()
-			sendTxt(unixConn, "trans_listener_ok")
-			print("rebuild listener success")
+			_ = sendTxt(unixConn, "trans_listener_ok")
+			myprint("rebuild listener success")
 		case "trans_conn":
-			print("start trans conn")
+			myprint("start trans conn")
 			for {
 				//wait for:conn fd
 				_type, msg, file, err := recv(unixConn)
 				if err != nil {
-					print("recv conn error1:", err.Error())
-					sendTxt(unixConn, "trans_conn_error")
+					myprint("recv conn error1:", err.Error())
+					_ = sendTxt(unixConn, "trans_conn_error")
 					continue
 				}
 				if _type == "txt" {
 					if msg == "trans_conn_finish" {
 						break
 					} else {
-						print("recv conn error2:", msg)
-						sendTxt(unixConn, "trans_conn_error")
+						myprint("recv conn error2:", msg)
+						_ = sendTxt(unixConn, "trans_conn_error")
 						continue
 					}
 				}
 				if _type == "fd" {
 					if s.rebuildConn(file) {
-						sendTxt(unixConn, "trans_conn_ok")
+						_ = sendTxt(unixConn, "trans_conn_ok")
 					} else {
-						sendTxt(unixConn, "trans_conn_error")
+						_ = sendTxt(unixConn, "trans_conn_error")
 					}
 				}
 			}
-			print("trans conn finished")
+			myprint("trans conn finished")
 		case "all_finish":
-			print("child unix socket exit")
+			myprint("child unix socket exit")
 			break WAIT_CMD
 		}
 	}
 }
 
-func (s *srvMgr) rebuildConn(file *os.File) (ret bool) {
+func (s *SrvMgr) rebuildConn(file *os.File) (ret bool) {
 	ret = false
 	defer func() {
 		if r := recover(); r != nil {
@@ -421,7 +462,7 @@ func (s *srvMgr) rebuildConn(file *os.File) (ret bool) {
 
 	oldConn, err := net.FileConn(file)
 	if err != nil {
-		print("fd to conn error:", err.Error())
+		myprint("fd to conn error:", err.Error())
 		ret = false
 	}
 	s.newConn(oldConn)
@@ -440,7 +481,12 @@ func _recv_fd(via *net.UnixConn, num int, filenames []string) ([]*os.File, error
 		return nil, err
 	}
 	socket := int(viaf.Fd())
-	defer viaf.Close()
+	defer func(viaf *os.File) {
+		err := viaf.Close()
+		if err != nil {
+			myprint(err)
+		}
+	}(viaf)
 
 	// recvmsg
 	buf := make([]byte, syscall.CmsgSpace(num*4))
@@ -481,7 +527,12 @@ func _send_fd(via *net.UnixConn, files ...*os.File) error {
 		return err
 	}
 	socket := int(viaf.Fd())
-	defer viaf.Close()
+	defer func(viaf *os.File) {
+		err := viaf.Close()
+		if err != nil {
+			myprint(err)
+		}
+	}(viaf)
 
 	fds := make([]int, len(files))
 	for i := range files {
@@ -501,10 +552,13 @@ func _send_txt(uc *net.UnixConn, b []byte) error {
 }
 func _recv_txt(uc *net.UnixConn) (string, error) {
 	b := make([]byte, 1)
-	uc.Read(b)
+	_, err := uc.Read(b)
+	if err != nil {
+		return "", err
+	}
 	l := uint8(b[0])
 	c := make([]byte, int(l))
-	_, err := uc.Read(c)
+	_, err = uc.Read(c)
 	return string(c), err
 }
 
@@ -561,7 +615,7 @@ func recv(uc *net.UnixConn) (_type string, txt string, file *os.File, err error)
 	return
 }
 
-func print(a ...interface{}) {
+func myprint(a ...interface{}) {
 	pid := os.Getpid()
 	str := "[pid:" + strconv.Itoa(pid) + "][" + _role + "]"
 
